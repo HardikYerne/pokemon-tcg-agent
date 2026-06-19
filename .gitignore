@@ -216,6 +216,7 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+<<<<<<< HEAD
 venv/
 __pycache__/
 *.pyc
@@ -245,3 +246,5 @@ knowledge/extracted_images/
 
 # Data
 data/
+=======
+>>>>>>> d8458452afbaef6e758526710625ce28fe0b0061
