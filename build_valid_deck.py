@@ -9,25 +9,25 @@ from collections import Counter
 cards_data = json.loads(lib.AllCard().decode())
 valid = {c['cardId']: c for c in cards_data}
 
-# confirmed valid IDs
-basics     = [251, 1072, 135, 721, 41, 61]   # non-ex basics HP>=100
-supporters = [1181,1182,1183,1184,1185,1186]  # all valid
-items      = [1154,1156,1157,1160,1161,1162,
-              1163,1164,1166,1168]             # valid items only
+# best pokemon for our deck:
+# Regigigas (251)  - colorless, 160HP, 100dmg
+# Snorlax (1072)   - colorless, 160HP, 160dmg
+# Kyogre (721)     - water,     150HP, 130dmg
 
 deck = (
-    # 12 Pokemon
-    [basics[0]]*2 + [basics[1]]*2 + [basics[2]]*2 +
-    [basics[3]]*2 + [basics[4]]*2 + [basics[5]]*2 +
-    # 18 Energy
-    [3]*18 +
-    # 12 Supporters
-    [supporters[0]]*2 + [supporters[1]]*2 + [supporters[2]]*2 +
-    [supporters[3]]*2 + [supporters[4]]*2 + [supporters[5]]*2 +
-    # 18 Items
-    [items[0]]*2 + [items[1]]*2 + [items[2]]*2 +
-    [items[3]]*2 + [items[4]]*2 + [items[5]]*2 +
-    [items[6]]*2 + [items[7]]*2 + [items[8]]*2
+    # Pokemon (12)
+    [251]*4 +    # Regigigas  - colorless attacker
+    [1072]*4 +   # Snorlax    - colorless attacker
+    [721]*4 +    # Kyogre     - water attacker
+    # Energy (18) - water works for Kyogre, colorless accepts anything
+    [3]*18 +     # Basic Water Energy
+    # Supporters (12)
+    [1181]*2 + [1182]*2 + [1183]*2 +
+    [1184]*2 + [1185]*2 + [1186]*2 +
+    # Items (18)
+    [1154]*2 + [1156]*2 + [1157]*2 +
+    [1160]*2 + [1161]*2 + [1162]*2 +
+    [1163]*2 + [1164]*2 + [1166]*2
 )
 
 print(f'Deck size: {len(deck)}')
@@ -38,7 +38,7 @@ print(f'Battle start: obs={obs is not None} errorType={s.errorType}')
 if obs:
     battle_finish()
     Path('data/my_deck.csv').write_text('\n'.join(str(c) for c in deck))
-    print('Saved to data/my_deck.csv!')
-    print('\nDeck contents:')
+    print('Saved!')
+    print('\nDeck:')
     for cid, cnt in Counter(deck).most_common():
-        print(f'  {cnt}x {valid[cid]["name"]:30} | HP:{valid[cid]["hp"]}')
+        print(f'  {cnt}x {valid[cid]["name"]}')
