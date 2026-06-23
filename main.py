@@ -4,18 +4,49 @@ import json
 from pathlib import Path
 
 # ── path setup ────────────────────────────────────────────────────────────────
-ROOT = Path.cwd()
-sys.path.insert(0, str(ROOT))
-sys.path.insert(0, str(ROOT / "sample_submission"))  # add this line
+# Kaggle executes main.py without __file__ defined
+# so we use os.getcwd() and hardcoded Kaggle path as fallbacks
 
-from cg.api import Observation, to_observation_class
+KAGGLE_PATH = Path("/kaggle_simulations/agent")
+LOCAL_PATH  = Path(os.getcwd())
+ROOT        = KAGGLE_PATH if KAGGLE_PATH.exists() else LOCAL_PATH
+
+# add all possible import paths
+sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "sample_submission"))
+sys.path.insert(0, "/kaggle_simulations/agent")
+
+from cg.api import to_observation_class
 from agent.rule_agent import RuleAgent
 
-# ── load card knowledge base ──────────────────────────────────────────────────
-def load_features() -> dict:
+
+# ── load deck ─────────────────────────────────────────────────────────────────
+def read_deck_csv() -> list:
+    """Load deck.csv — tries Kaggle path first, then local paths."""
     paths = [
-        ROOT / "knowledge" / "card_knowledge_base.json",
+        Path("/kaggle_simulations/agent/deck.csv"),
+        ROOT / "deck.csv",
+        ROOT / "data" / "my_deck.csv",
+        Path("deck.csv"),
+        Path("data/my_deck.csv"),
+    ]
+    for p in paths:
+        if p.exists():
+            with open(p, "r") as f:
+                lines = f.read().strip().split("\n")
+            deck = [int(lines[i]) for i in range(60)]
+            print(f"[main] Deck loaded ({len(deck)} cards) from {p}")
+            return deck
+    raise FileNotFoundError("deck.csv not found in any expected location")
+
+
+# ── load card features ────────────────────────────────────────────────────────
+def load_features() -> dict:
+    """Load card knowledge base — tries Kaggle path first."""
+    paths = [
         Path("/kaggle_simulations/agent/knowledge/card_knowledge_base.json"),
+        ROOT / "knowledge" / "card_knowledge_base.json",
+        Path("knowledge/card_knowledge_base.json"),
     ]
     for p in paths:
         if p.exists():
@@ -25,23 +56,6 @@ def load_features() -> dict:
             return data
     print("[main] Warning: card_knowledge_base.json not found — using empty features")
     return {}
-
-
-# ── load deck ─────────────────────────────────────────────────────────────────
-def read_deck_csv() -> list:
-    paths = [
-        ROOT / "deck.csv",
-        Path("/kaggle_simulations/agent/deck.csv"),
-        ROOT / "data" / "my_deck.csv",
-    ]
-    for p in paths:
-        if p.exists():
-            with open(p, "r") as f:
-                lines = f.read().strip().split("\n")
-            deck = [int(lines[i]) for i in range(60)]
-            print(f"[main] Loaded deck ({len(deck)} cards) from {p}")
-            return deck
-    raise FileNotFoundError("deck.csv not found")
 
 
 # ── initialise agent (once at module load) ────────────────────────────────────
@@ -71,10 +85,9 @@ def agent(obs_dict: dict) -> list:
 # ── local test ────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     import random
-    from environment.simulator_wrapper import SimulatorWrapper, run_game
-    from cg.api import to_observation_class
+    from environment.simulator_wrapper import run_game
 
-    print("\n[main] Running local test — Rule agent vs Random agent (5 games)")
+    print("\n[main] Running local test — Rule vs Random (5 games)")
     print("─" * 60)
 
     def random_agent(obs_dict):
@@ -83,23 +96,23 @@ if __name__ == "__main__":
             return _deck
         n        = len(obs.select.option)
         minCount = obs.select.minCount
-        if n == 0:      return []
+        if n == 0:        return []
         if minCount == 0: return []
         return random.sample(list(range(n)), min(minCount, n))
 
-    rule_wins   = 0
-    random_wins = 0
+    rule_wins = 0
+    rand_wins = 0
 
     for i in range(5):
         if i % 2 == 0:
             r = run_game(_deck, _deck, agent, random_agent)
             if r["winner"] == 0: rule_wins += 1
-            else: random_wins += 1
+            else: rand_wins += 1
             side = "Rule=P0"
         else:
             r = run_game(_deck, _deck, random_agent, agent)
             if r["winner"] == 1: rule_wins += 1
-            else: random_wins += 1
+            else: rand_wins += 1
             side = "Rule=P1"
 
         print(f"  Game {i+1} [{side}]: "
@@ -108,8 +121,5 @@ if __name__ == "__main__":
               f"Err={r['error']}")
 
     print(f"\n  Rule wins  : {rule_wins}/5")
-    print(f"  Random wins: {random_wins}/5")
+    print(f"  Random wins: {rand_wins}/5")
     print("─" * 60)
-    print("\n[main] To submit to Kaggle:")
-    print("  1. Copy deck.csv + main.py + agent/ + knowledge/ + cg/ to submission folder")
-    print("  2. Zip and upload via 'Submit Agent' button on competition page")

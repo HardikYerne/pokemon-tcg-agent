@@ -8,7 +8,7 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "sample_submission"))
 
 from cg.api import to_observation_class
-from environment.simulator_wrapper import OPTION_TYPE
+
 
 
 # ── Option type constants ─────────────────────────────────────────────────────
