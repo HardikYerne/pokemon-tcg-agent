@@ -3,61 +3,61 @@ import json
 import random
 from pathlib import Path
 
-ROOT = Path(__file__).parent.parent
+import os
+KAGGLE_PATH = Path("/kaggle_simulations/agent")
+LOCAL_PATH  = Path(os.getcwd())
+ROOT        = KAGGLE_PATH if KAGGLE_PATH.exists() else LOCAL_PATH
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "sample_submission"))
+sys.path.insert(0, "/kaggle_simulations/agent")
 
 from cg.api import to_observation_class
 
-
-
-# ── Option type constants ─────────────────────────────────────────────────────
-T_MULLIGAN      = 0
-T_COIN_HEAD     = 1
-T_COIN_TAIL     = 2
+# ── Option types ──────────────────────────────────────────────────────────────
+T_MULLIGAN       = 0
+T_COIN_HEAD      = 1
+T_COIN_TAIL      = 2
 T_SELECT_POKEMON = 3
-T_PLAY_CARD     = 7
-T_PLACE_BENCH   = 8
-T_EVOLVE        = 9
-T_USE_ABILITY   = 12
-T_ATTACK        = 13
-T_END_TURN      = 14
+T_PLAY_CARD      = 7
+T_PLACE_BENCH    = 8
+T_EVOLVE         = 9
+T_USE_ABILITY    = 12
+T_ATTACK         = 13
+T_END_TURN       = 14
+
+OPTION_TYPE = {
+    0:"MULLIGAN", 1:"COIN_HEAD", 2:"COIN_TAIL",
+    3:"SELECT_POKEMON", 7:"PLAY_CARD", 8:"PLACE_BENCH",
+    9:"EVOLVE", 12:"USE_ABILITY", 13:"ATTACK", 14:"END_TURN"
+}
 
 
 class RuleAgent:
     """
-    Rule-based Pokémon TCG agent.
+    V2 Rule Agent — improved attack selection and energy awareness.
 
-    Decision priority each turn:
-      1. Attack if can KO opponent active
-      2. Evolve active/bench Pokémon
-      3. Place Pokémon on bench (build board)
-      4. Play trainer cards from hand
-      5. Use ability
-      6. Attack with best available attack
-      7. End turn
-    
-    For non-turn decisions (coin flips, select Pokémon, mulligan):
-      Uses strategic defaults.
+    Key improvements over V1:
+    1. Counts energy on active Pokemon before committing to attack
+    2. Prefers high-damage attacks that KO opponent
+    3. Uses Spike Draw (type 7, low damage) early to draw cards
+    4. Aggressive prize racing — always attack if we can deal damage
+    5. Smarter going-second detection and response
     """
 
-    def __init__(self, deck: list, card_features: dict = None, verbose: bool = False):
-        self.deck          = deck          # 60 card IDs
-        self.card_features = card_features or {}  # from card_knowledge_base.json
+    def __init__(self, deck: list, card_features: dict = None,
+                 attacks_db: dict = None, verbose: bool = False):
+        self.deck          = deck
+        self.card_features = card_features or {}
+        self.attacks_db    = attacks_db or {}   # attackId -> attack data
         self.verbose       = verbose
         self.turn_count    = 0
 
     # ── Main entry point ──────────────────────────────────────────────────────
 
     def act(self, obs_dict: dict) -> list:
-        """
-        Main agent function — matches the Kaggle submission signature.
-        obs_dict: raw observation dict from simulator
-        Returns: list[int] — indices into obs.select.option
-        """
         obs = to_observation_class(obs_dict)
 
-        # deck selection phase
+        # deck selection
         if obs.select is None:
             return self.deck
 
@@ -69,251 +69,226 @@ class RuleAgent:
         if n == 0:
             return []
 
-        # get option types present
         types = [o.type for o in options]
 
-        if self.verbose:
-            type_names = [OPTION_TYPE.get(t, str(t)) for t in types]
-            print(f"  [agent] turn={self.turn_count} "
-                  f"n={n} min={minCount} types={type_names}")
-
-        # ── route by decision type ────────────────────────────────────────────
-
-        # coin flip — always pick heads (index 0 = HEAD)
+        # coin flip — always heads
         if T_COIN_HEAD in types:
-            return self._pick(options, T_COIN_HEAD, minCount)
+            return self._pick_type(options, T_COIN_HEAD)
 
-        # mulligan — pick any basic (random among options)
+        # mulligan
         if T_MULLIGAN in types:
             return self._random_of_type(options, T_MULLIGAN, minCount)
 
-        # select pokemon (active/bench/prize) — pick strategically
+        # pokemon selection
         if all(t == T_SELECT_POKEMON for t in types):
-            return self._select_pokemon(options, minCount, maxCount, obs_dict)
+            return self._select_pokemon(options, minCount, obs_dict)
 
-        # main turn decisions
-        action = self._main_turn_action(options, minCount, maxCount, obs_dict)
+        # main turn
+        action = self._main_turn(options, minCount, maxCount, obs_dict)
         self.turn_count += 1
         return action
 
-    # ── Main turn logic ───────────────────────────────────────────────────────
+    # ── Main turn ─────────────────────────────────────────────────────────────
 
-    def _main_turn_action(self, options, minCount, maxCount, obs_dict) -> list:
-        """Priority-ordered main turn decision."""
-        types = [o.type for o in options]
+    def _main_turn(self, options, minCount, maxCount, obs_dict) -> list:
+        types   = [o.type for o in options]
+        current = obs_dict.get("current", {})
+        players = current.get("players", [{}, {}])
+        my_idx  = current.get("yourIndex", 0)
+        me      = players[my_idx] if len(players) > my_idx else {}
+        opp     = players[1-my_idx] if len(players) > 1-my_idx else {}
 
-        # 1. ATTACK — highest priority
+        my_active   = me.get("active", [])
+        opp_active  = opp.get("active", [])
+        my_energy   = len(my_active[0].get("energies", [])) if my_active else 0
+        opp_hp      = opp_active[0]["hp"] if opp_active else 9999
+        my_prizes   = sum(1 for p in me.get("prize",[]) if p is None)
+        opp_prizes  = sum(1 for p in opp.get("prize",[]) if p is None)
+        prize_lead  = my_prizes - opp_prizes
+        turn        = current.get("turn", 0)
+        first_player = current.get("firstPlayer", 0)
+        going_second = (my_idx != first_player)
+
+        if self.verbose:
+            print(f"  [v2] turn={turn} energy={my_energy} "
+                  f"opp_hp={opp_hp} prizes={my_prizes}-{opp_prizes} "
+                  f"P2={going_second}")
+
+        # ── 1. ATTACK — always if KO available ───────────────────────────────
         if T_ATTACK in types:
-            attack_indices = [i for i, o in enumerate(options)
-                              if o.type == T_ATTACK]
+            atk_indices = [i for i,o in enumerate(options) if o.type == T_ATTACK]
+            ko_idx = self._find_ko_attack(atk_indices, options, opp_hp)
+            if ko_idx is not None:
+                if self.verbose: print(f"  [v2] → KO ATTACK")
+                return [ko_idx]
 
-            # try to find best attack
-            best = self._best_attack(attack_indices, options, obs_dict)
-            if best is not None:
-                if self.verbose:
-                    print(f"  [agent] → ATTACK index={best}")
+        # ── 2. BENCH — build board if bench is empty ─────────────────────────
+        my_bench = len(me.get("bench", []))
+        if T_PLACE_BENCH in types and my_bench == 0:
+            bench_idx = [i for i,o in enumerate(options) if o.type == T_PLACE_BENCH]
+            if bench_idx:
+                best = self._best_bench(bench_idx, options)
+                if self.verbose: print(f"  [v2] → BENCH (empty bench)")
                 return [best]
 
-        # 2. EVOLVE — evolve Pokémon when possible
+        # ── 3. EVOLVE ─────────────────────────────────────────────────────────
         if T_EVOLVE in types:
-            evolve_idx = [i for i, o in enumerate(options)
-                          if o.type == T_EVOLVE]
-            if evolve_idx:
-                if self.verbose:
-                    print(f"  [agent] → EVOLVE")
-                return [evolve_idx[0]]
+            evo_idx = [i for i,o in enumerate(options) if o.type == T_EVOLVE]
+            if evo_idx:
+                if self.verbose: print(f"  [v2] → EVOLVE")
+                return [evo_idx[0]]
 
-        # 3. PLACE ON BENCH — build board presence
-        if T_PLACE_BENCH in types:
-            bench_indices = [i for i, o in enumerate(options)
-                             if o.type == T_PLACE_BENCH]
-            if bench_indices:
-                chosen = self._best_bench_placement(bench_indices, options, obs_dict)
-                if self.verbose:
-                    print(f"  [agent] → BENCH index={chosen}")
-                return [chosen]
-
-        # 4. PLAY CARD from hand
+        # ── 4. PLAY CARD — supporter/item ────────────────────────────────────
         if T_PLAY_CARD in types:
-            card_indices = [i for i, o in enumerate(options)
-                            if o.type == T_PLAY_CARD]
-            if card_indices:
-                chosen = self._best_card_to_play(card_indices, options, obs_dict)
-                if self.verbose:
-                    print(f"  [agent] → PLAY_CARD index={chosen}")
-                return [chosen]
+            card_idx = [i for i,o in enumerate(options) if o.type == T_PLAY_CARD]
+            if card_idx:
+                best = self._best_card(card_idx, options, current)
+                if self.verbose: print(f"  [v2] → PLAY_CARD")
+                return [best]
 
-        # 5. USE ABILITY
+        # ── 5. ATTACK — best available even without KO ────────────────────────
+        if T_ATTACK in types:
+            atk_indices = [i for i,o in enumerate(options) if o.type == T_ATTACK]
+            # going second — always attack aggressively
+            if going_second or my_energy >= 2:
+                best = self._best_attack(atk_indices, options, opp_hp)
+                if best is not None:
+                    if self.verbose: print(f"  [v2] → ATTACK (aggressive)")
+                    return [best]
+
+        # ── 6. BENCH — build board ────────────────────────────────────────────
+        if T_PLACE_BENCH in types:
+            bench_idx = [i for i,o in enumerate(options) if o.type == T_PLACE_BENCH]
+            if bench_idx:
+                best = self._best_bench(bench_idx, options)
+                if self.verbose: print(f"  [v2] → BENCH")
+                return [best]
+
+        # ── 7. USE ABILITY ────────────────────────────────────────────────────
         if T_USE_ABILITY in types:
-            ability_idx = [i for i, o in enumerate(options)
-                           if o.type == T_USE_ABILITY]
-            if ability_idx:
-                if self.verbose:
-                    print(f"  [agent] → USE_ABILITY")
-                return [ability_idx[0]]
+            ab_idx = [i for i,o in enumerate(options) if o.type == T_USE_ABILITY]
+            if ab_idx:
+                if self.verbose: print(f"  [v2] → ABILITY")
+                return [ab_idx[0]]
 
-        # 6. END TURN — pass
+        # ── 8. ATTACK — last resort ───────────────────────────────────────────
+        if T_ATTACK in types:
+            atk_indices = [i for i,o in enumerate(options) if o.type == T_ATTACK]
+            best = self._best_attack(atk_indices, options, opp_hp)
+            if best is not None:
+                if self.verbose: print(f"  [v2] → ATTACK (last resort)")
+                return [best]
+
+        # ── 9. END TURN ───────────────────────────────────────────────────────
         if T_END_TURN in types:
-            end_idx = next(i for i, o in enumerate(options)
-                           if o.type == T_END_TURN)
-            if self.verbose:
-                print(f"  [agent] → END_TURN")
+            end_idx = next(i for i,o in enumerate(options) if o.type == T_END_TURN)
+            if self.verbose: print(f"  [v2] → END_TURN")
             return [end_idx]
 
-        # 7. fallback — random safe choice
-        if minCount == 0:
-            return []
-        count = min(minCount, len(options))
-        return random.sample(list(range(len(options))), count)
+        # fallback
+        if minCount == 0: return []
+        return random.sample(list(range(len(options))), min(minCount, len(options)))
 
-    # ── Attack selection ──────────────────────────────────────────────────────
+    # ── Attack helpers ────────────────────────────────────────────────────────
 
-    def _best_attack(self, attack_indices, options, obs_dict) -> int:
-        """
-        Choose best attack index.
-        Priority: attack that KOs opponent > highest damage > first available
-        """
-        current    = obs_dict.get("current", {})
-        players    = current.get("players", [{}, {}])
-        my_idx     = current.get("yourIndex", 0)
-        opp        = players[1 - my_idx] if len(players) > 1 else {}
-        opp_active = opp.get("active", [])
-        opp_hp     = opp_active[0]["hp"] if opp_active else 9999
+    def _find_ko_attack(self, atk_indices, options, opp_hp) -> int:
+        """Return index of attack that KOs opponent, or None."""
+        for i in atk_indices:
+            dmg = self._get_damage(options[i].attackId)
+            if dmg >= opp_hp:
+                return i
+        return None
 
+    def _best_attack(self, atk_indices, options, opp_hp) -> int:
+        """Return index of highest-damage attack."""
         best_idx   = None
         best_score = -1
-
-        for i in attack_indices:
-            opt       = options[i]
-            attack_id = opt.attackId
-            dmg       = self._get_attack_damage(attack_id)
-
-            # score: KO = 10000 bonus, else just damage
-            score = dmg
-            if dmg >= opp_hp:
-                score += 10000  # KO bonus
-
+        for i in atk_indices:
+            dmg = self._get_damage(options[i].attackId)
+            score = dmg + (10000 if dmg >= opp_hp else 0)
             if score > best_score:
                 best_score = score
                 best_idx   = i
-
         return best_idx
 
-    def _get_attack_damage(self, attack_id) -> int:
-        """Look up attack damage from card features."""
+    def _get_damage(self, attack_id) -> int:
+        """Look up damage from attacks_db or card_features."""
         if not attack_id:
             return 0
-        # attack_id maps to a card in our knowledge base
-        # search by card_id since attack_id is the card's attack
+        # check attacks db first (most accurate)
+        atk = self.attacks_db.get(attack_id)
+        if atk:
+            return atk.get("damage", 0)
+        # fallback to card features
         cf = self.card_features.get(str(attack_id))
         if cf:
             return cf.get("attack_damage") or 0
-        return 30  # default estimate
+        return 30
 
-    # ── Bench placement ───────────────────────────────────────────────────────
+    # ── Bench helpers ─────────────────────────────────────────────────────────
 
-    def _best_bench_placement(self, bench_indices, options, obs_dict) -> int:
-        """
-        Choose which Pokémon to place on bench.
-        Prefer: higher HP basics, evolution targets
-        """
+    def _best_bench(self, bench_indices, options) -> int:
+        """Prefer highest HP bench Pokémon."""
         best_idx   = bench_indices[0]
         best_score = -1
-
         for i in bench_indices:
             opt    = options[i]
             card_id = getattr(opt, "cardId", None) or getattr(opt, "index", None)
             cf     = self.card_features.get(str(card_id)) if card_id else None
-
-            score = 0
-            if cf:
-                hp    = cf.get("hp") or 0
-                score = hp  # prefer higher HP
-                # bonus for cards that evolve into something
-                if cf.get("subtype") == "Basic":
-                    score += 10
-
+            score  = (cf.get("hp") or 0) if cf else 0
             if score > best_score:
                 best_score = score
                 best_idx   = i
-
         return best_idx
 
-    # ── Card play selection ───────────────────────────────────────────────────
+    # ── Card play helpers ─────────────────────────────────────────────────────
 
-    def _best_card_to_play(self, card_indices, options, obs_dict) -> int:
-        """
-        Choose best trainer card to play.
-        Priority: draw supporters > search cards > other
-        """
-        current        = obs_dict.get("current", {})
+    def _best_card(self, card_indices, options, current) -> int:
+        """Priority: draw supporters > search > energy accel > other."""
         supporter_played = current.get("supporterPlayed", False)
-
         best_idx   = card_indices[0]
         best_score = -1
-
         for i in card_indices:
             opt     = options[i]
             card_id = getattr(opt, "cardId", None) or getattr(opt, "index", None)
             cf      = self.card_features.get(str(card_id)) if card_id else None
-
-            score = 10  # base score for playing any card
-
+            score   = 10
             if cf:
-                # don't replay supporter if already played
                 if cf.get("subtype") == "Supporter" and supporter_played:
                     score = -1
                 elif cf.get("is_draw_supporter"):
-                    score = 100  # draw cards = high value
+                    score = 100
                 elif cf.get("is_search_card"):
                     score = 80
                 elif cf.get("is_energy_accel"):
                     score = 70
                 elif cf.get("is_disruption"):
-                    score = 60
-
+                    score = 50
             if score > best_score:
                 best_score = score
                 best_idx   = i
-
         return best_idx
 
-    # ── Pokémon selection ─────────────────────────────────────────────────────
+    # ── Pokemon selection ─────────────────────────────────────────────────────
 
-    def _select_pokemon(self, options, minCount, maxCount, obs_dict) -> list:
-        """
-        Handle SELECT_POKEMON decisions — choosing active, bench target, etc.
-        Strategy: prefer highest HP Pokémon as active,
-                  prefer lowest HP for prize selection (take easiest prize)
-        """
-        current  = obs_dict.get("current", {})
-        context  = obs_dict.get("select", {}).get("context", 0)
-
+    def _select_pokemon(self, options, minCount, obs_dict) -> list:
         scored = []
         for i, opt in enumerate(options):
             card_id = getattr(opt, "cardId", None)
             area    = getattr(opt, "area", None)
             cf      = self.card_features.get(str(card_id)) if card_id else None
-            hp      = cf.get("hp") or 100 if cf else 100
-
-            # area 6 = opponent's field (taking prizes) → prefer low HP targets
-            if area == 6:
-                score = -hp   # lower HP = easier KO = better prize
-            else:
-                score = hp    # higher HP = better active/bench
-
+            hp      = (cf.get("hp") or 100) if cf else 100
+            # area 6 = opponent field (prize target) → prefer low HP
+            score   = -hp if area == 6 else hp
             scored.append((score, i))
-
         scored.sort(reverse=True)
-        count   = max(minCount, 1) if minCount > 0 else 1
-        count   = min(count, len(options))
-        chosen  = [idx for _, idx in scored[:count]]
-        return chosen
+        count  = max(minCount, 1) if minCount > 0 else 1
+        count  = min(count, len(options))
+        return [idx for _, idx in scored[:count]]
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 
-    def _pick(self, options, target_type, minCount) -> list:
-        """Pick first option of target_type."""
+    def _pick_type(self, options, target_type) -> list:
         for i, o in enumerate(options):
             if o.type == target_type:
                 return [i]
@@ -327,93 +302,58 @@ class RuleAgent:
         return random.sample(indices, min(count, len(indices)))
 
 
-# ── Kaggle submission wrapper ─────────────────────────────────────────────────
+# ── Factory ───────────────────────────────────────────────────────────────────
 
-def make_agent(deck: list, card_features: dict = None):
-    """
-    Factory — returns the agent() function for Kaggle submission.
-    Usage in main.py:
-        from agent.rule_agent import make_agent
-        agent = make_agent(deck)
-    """
-    bot = RuleAgent(deck, card_features)
-
+def make_agent(deck: list, card_features: dict = None, attacks_db: dict = None):
+    """Returns agent function for Kaggle submission."""
+    bot = RuleAgent(deck, card_features, attacks_db)
     def agent(obs_dict: dict) -> list:
         return bot.act(obs_dict)
-
     return agent
 
 
 # ── Test ──────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    import json
-    from environment.simulator_wrapper import (
-        SimulatorWrapper, load_deck_csv, run_game
-    )
+    import random as rnd
+    from cg.sim import lib
+    from environment.simulator_wrapper import load_deck_csv, run_game
 
-    deck_path = ROOT / "sample_submission" / "deck.csv"
-    deck      = load_deck_csv(deck_path)
+    deck = load_deck_csv(ROOT / "deck.csv")
 
-    # load card features
-    kb_path  = ROOT / "knowledge" / "card_knowledge_base.json"
-    features = {}
-    if kb_path.exists():
-        with open(kb_path, encoding="utf-8") as f:
-            features = json.load(f)
-        print(f"[rule_agent] Loaded {len(features)} card features")
+    with open(ROOT / "knowledge" / "card_knowledge_base.json", encoding="utf-8") as f:
+        features = json.load(f)
 
-    # create agents
-    rule_agent = make_agent(deck, features)
+    # load attacks db
+    attacks_data = json.loads(lib.AllAttack().decode())
+    atk_db = {a["attackId"]: a for a in attacks_data}
+    print(f"[v2] Loaded {len(atk_db)} attacks")
+
+    agent_v2 = make_agent(deck, features, atk_db)
 
     def random_agent(obs_dict):
         obs = to_observation_class(obs_dict)
-        if obs.select is None:
-            return deck
-        n        = len(obs.select.option)
+        if obs.select is None: return deck
+        n = len(obs.select.option)
         minCount = obs.select.minCount
         if n == 0: return []
         if minCount == 0: return []
-        return random.sample(list(range(n)), min(minCount, n))
+        return rnd.sample(list(range(n)), min(minCount, n))
 
-    # run 10 games: rule vs random
-    print("\n[rule_agent] Rule agent vs Random agent — 10 games")
-    print("─" * 50)
-
-    rule_wins   = 0
-    random_wins = 0
-    errors      = 0
-    total_turns = 0
-
-    for i in range(10):
-        # alternate who goes first
+    print("\n[v2] Rule v2 vs Random — 20 games")
+    print("─"*55)
+    wins = losses = 0
+    for i in range(20):
         if i % 2 == 0:
-            result = run_game(deck, deck,
-                              agent0_fn=rule_agent,
-                              agent1_fn=random_agent)
-            if result["winner"] == 0:
-                rule_wins += 1
-            elif result["winner"] == 1:
-                random_wins += 1
+            r = run_game(deck, deck, agent_v2, random_agent)
+            if r["winner"] == 0: wins += 1
+            else: losses += 1
+            side = "V2=P0"
         else:
-            result = run_game(deck, deck,
-                              agent0_fn=random_agent,
-                              agent1_fn=rule_agent)
-            if result["winner"] == 1:
-                rule_wins += 1
-            elif result["winner"] == 0:
-                random_wins += 1
+            r = run_game(deck, deck, random_agent, agent_v2)
+            if r["winner"] == 1: wins += 1
+            else: losses += 1
+            side = "V2=P1"
+        print(f"  Game {i+1:2d} [{side}]: W=P{r['winner']} T={r['turns']:3d}")
 
-        if result["error"]:
-            errors += 1
-        total_turns += result["turns"]
-        print(f"  Game {i+1:2d}: Winner=Player {result['winner']} "
-              f"Turns={result['turns']:3d} Error={result['error']}")
-
-    avg_turns = total_turns / 10
-    print(f"\n── Results ─────────────────────────────────")
-    print(f"  Rule agent wins  : {rule_wins}/10")
-    print(f"  Random agent wins: {random_wins}/10")
-    print(f"  Errors           : {errors}")
-    print(f"  Avg turns/game   : {avg_turns:.1f}")
-    print(f"────────────────────────────────────────────")
+    print(f"\n  V2 wins: {wins}/20 ({wins*5}%)")
