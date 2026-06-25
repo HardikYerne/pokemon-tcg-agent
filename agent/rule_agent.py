@@ -19,7 +19,7 @@ T_COIN_HEAD      = 1
 T_COIN_TAIL      = 2
 T_SELECT_POKEMON = 3
 T_PLAY_CARD      = 7
-T_PLACE_BENCH    = 8
+T_PLACE_HAND     = 6
 T_EVOLVE         = 9
 T_USE_ABILITY    = 12
 T_ATTACK         = 13
@@ -124,7 +124,8 @@ class RuleAgent:
 
         # ── 2. BENCH — build board if bench is empty ─────────────────────────
         my_bench = len(me.get("bench", []))
-        if T_PLACE_BENCH in types and my_bench == 0:
+        # 3. PLACE ON BENCH — build board presence
+       if T_PLACE_BENCH in types: and my_bench == 0:
             bench_idx = [i for i,o in enumerate(options) if o.type == T_PLACE_BENCH]
             if bench_idx:
                 best = self._best_bench(bench_idx, options)
