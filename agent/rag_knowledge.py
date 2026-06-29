@@ -372,6 +372,7 @@ class RAGAgent:
         return [0]
 
     def _random_of_type(self, options, t, minCount):
+        import random
         idx = [i for i,o in enumerate(options) if o.type == t]
         if not idx: idx = list(range(len(options)))
         return random.sample(idx, min(max(minCount, 1), len(idx)))
