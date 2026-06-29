@@ -1,6 +1,7 @@
 import os
 import sys
 import json
+import v2
 from pathlib import Path
 
 # ── path setup ────────────────────────────────────────────────────────────────
@@ -17,7 +18,7 @@ sys.path.insert(0, str(ROOT / "sample_submission"))
 sys.path.insert(0, "/kaggle_simulations/agent")
 
 from cg.api import to_observation_class
-from agent.rule_agent import RuleAgent
+from agent.mcts_agent import MCTSAgent as RuleAgent
 
 
 # ── load deck ─────────────────────────────────────────────────────────────────
